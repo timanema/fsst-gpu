@@ -74,12 +74,11 @@ namespace gtsst
         gtsstErrorTooBig,
     };
 
-    // TODO: remove sample src
     struct CompressionManager
     {
         virtual ~CompressionManager() = default;
         virtual CompressionConfiguration configure_compression(size_t buf_size) = 0;
-        virtual GTSSTStatus compress(const uint8_t* src, uint8_t* dst, const uint8_t* sample_src, uint8_t* tmp,
+        virtual GTSSTStatus compress(const uint8_t* src, uint8_t* dst, uint8_t* tmp,
                                      CompressionConfiguration& config, size_t* out_size,
                                      CompressionStatistics& stats) = 0;
 

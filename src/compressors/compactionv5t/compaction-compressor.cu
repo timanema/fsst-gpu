@@ -63,7 +63,7 @@ namespace gtsst::compressors {
         return gtsstSuccess;
     }
 
-    GTSSTStatus CompactionV5TCompressor::compress(const uint8_t* src, uint8_t* dst, const uint8_t* sample_src,
+    GTSSTStatus CompactionV5TCompressor::compress(const uint8_t* src, uint8_t* dst,
                                                   uint8_t* tmp, CompressionConfiguration& config, size_t* out_size,
                                                   CompressionStatistics& stats) {
         if (const GTSSTStatus buffer_validation = validate_compression_buffers(src, dst, tmp, config);

@@ -47,11 +47,11 @@ namespace gtsst::bench {
     void write_file(const char* filename, const char* data, size_t len);
 
 
-    CompressionStats compress_single(const uint8_t* src, uint8_t* dst, const uint8_t* sample_src, uint8_t* tmp,
+    CompressionStats compress_single(const uint8_t* src, uint8_t* dst, uint8_t* tmp,
                                      CompressionConfiguration& compression_configuration,
                                      CompressionManager& compression_manager);
 
-    AggregatedCompressionStats compress_repeat(const uint8_t* src, uint8_t* dst, const uint8_t* sample_src,
+    AggregatedCompressionStats compress_repeat(const uint8_t* src, uint8_t* dst,
                                                uint8_t* tmp, CompressionConfiguration& compression_configuration,
                                                CompressionManager& compression_manager, int iterations = 1);
 

@@ -59,13 +59,13 @@ namespace gtsst::bench {
         out_file.write(data, len);
     }
 
-    CompressionStats compress_single(const uint8_t* src, uint8_t* dst, const uint8_t* sample_src, uint8_t* tmp,
+    CompressionStats compress_single(const uint8_t* src, uint8_t* dst, uint8_t* tmp,
                                      CompressionConfiguration& compression_configuration,
                                      CompressionManager& compression_manager) {
         CompressionStats stats = {.original_len = compression_configuration.input_buffer_size};
 
         const auto start = std::chrono::high_resolution_clock::now();
-        const auto status = compression_manager.compress(src, dst, sample_src, tmp, compression_configuration,
+        const auto status = compression_manager.compress(src, dst, tmp, compression_configuration,
                                                          &stats.compress_len, stats.internal_stats);
         const auto end = std::chrono::high_resolution_clock::now();
 
@@ -81,7 +81,7 @@ namespace gtsst::bench {
         return stats;
     }
 
-    AggregatedCompressionStats compress_repeat(const uint8_t* src, uint8_t* dst, const uint8_t* sample_src,
+    AggregatedCompressionStats compress_repeat(const uint8_t* src, uint8_t* dst,
                                                uint8_t* tmp, CompressionConfiguration& compression_configuration,
                                                CompressionManager& compression_manager, int iterations) {
         AggregatedCompressionStats aggregated_stats = {};
@@ -100,7 +100,7 @@ namespace gtsst::bench {
 
         for (int i = 0; i < iterations; i++) {
             CompressionStats stats =
-                compress_single(src, dst, sample_src, tmp, compression_configuration, compression_manager);
+                compress_single(src, dst, tmp, compression_configuration, compression_manager);
             aggregated_stats.stats.push_back(stats);
 
             compression_duration.push_back(stats.compression_duration);
@@ -290,7 +290,6 @@ namespace gtsst::bench {
         const bool dev_buf = compression_configuration.device_buffers;
 
         // Allocate buffers
-        const uint8_t* sample_src = src;
         auto* dst = (uint8_t*)malloc(compression_configuration.compression_buffer_size);
         uint8_t* tmp;
         uint8_t* func_src;
@@ -313,7 +312,7 @@ namespace gtsst::bench {
 
         // Run compression
         AggregatedCompressionStats compression_stats =
-            compress_repeat(func_src, func_dst, sample_src, tmp, compression_configuration, compression_manager,
+            compress_repeat(func_src, func_dst, tmp, compression_configuration, compression_manager,
                             compression_iterations);
 
         // Run decompression
