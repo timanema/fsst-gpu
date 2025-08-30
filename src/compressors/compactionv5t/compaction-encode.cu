@@ -18,7 +18,7 @@ namespace gtsst::compressors::compactionv5t {
 
         const uint32_t current = result[res][threadIdx.x];
 
-        // If the value to be overwritten is not 0xFE (padding) there is an overflow..
+        // If the value to be overwritten is not 0xFE (padding), there is an overflow.
         assert((current & ~clean_mask) >> shift == 0xFE);
 
         result[res][threadIdx.x] = current & clean_mask | val_mask;
@@ -108,11 +108,17 @@ namespace gtsst::compressors::compactionv5t {
         return any_thread_risk_overflow || all_thread_ahead;
     }
 
-    __device__ void flush(uint8_t* dst, uint32_t result[tile_out_word_buf_size][THREAD_COUNT],
+    __device__ bool flush(uint8_t* dst, uint32_t result[tile_out_word_buf_size][THREAD_COUNT],
                           const uint32_t flushes_before, const uint8_t active_out_block) {
         // We assume that all threads participate in this, and that they all have the same active_out_block. This should
         // be maintained by calling functions
         assert(__activemask() == 0xFFFFFFFF);
+
+        // This block is about to overrun its buffer, so this specific block is not compressing well at all (CR < 1.0),
+        // so return and signal. Just use original data for this block and don't compress it :(
+        if (flushes_before >= tile_out_len_words - 1) {
+            return false;
+        }
 
         // We also assume there is no buffer overrun. If there are more flushes than tile_out_len_words, the tiles are
         // writing more data than they are allowed to
@@ -127,8 +133,9 @@ namespace gtsst::compressors::compactionv5t {
         const uint32_t word = result[active_out_block][threadIdx.x];
         dst_aligned[flushes_before * THREAD_COUNT + threadIdx.x] = word;
 
-        // Reset current block for next use
+        // Reset the current block for next use
         result[active_out_block][threadIdx.x] = 0xFEFEFEFE;
+        return true;
     }
 
     struct EncodeResult {
@@ -138,6 +145,7 @@ namespace gtsst::compressors::compactionv5t {
         uint8_t spillover_len;
         uint8_t out;
         uint8_t active_out_block;
+        bool flush_failed;
     };
 
     __device__ inline bool is_early_flush(const uint8_t out, const uint8_t active_out_block) {
@@ -219,7 +227,7 @@ namespace gtsst::compressors::compactionv5t {
                     assert(out % sizeof(uint32_t) == 0);
                 }
 
-                flush(dst, result, flushes_before, active_out_block);
+                if (!flush(dst, result, flushes_before, active_out_block)) return EncodeResult{.flush_failed = true};
                 active_out_block = (active_out_block + 1) % tile_out_word_buf_size;
                 flushes_before += 1;
             }
@@ -271,7 +279,7 @@ namespace gtsst::compressors::compactionv5t {
                     assert(out % sizeof(uint32_t) == 0);
                 }
 
-                flush(dst, result, flushes_before, active_out_block);
+                if (!flush(dst, result, flushes_before, active_out_block)) return EncodeResult{.flush_failed = true};
                 active_out_block = (active_out_block + 1) % tile_out_word_buf_size;
                 flushes_before += 1;
             }
@@ -312,9 +320,12 @@ namespace gtsst::compressors::compactionv5t {
         uint8_t block_out_location = 0;
         uint8_t active_out_block = 0;
 
+        // Keep track of encoding failure
+        bool encode_failed = false;
+
         const auto aligned_src = (uint32_t*)src;
 
-        // Make sure result is in the correct state
+        // Make sure that result is in the correct state
         for (int i = 0; i < tile_out_word_buf_size; i++) {
             result[i][threadIdx.x] = 0xFEFEFEFE;
         }
@@ -338,10 +349,16 @@ namespace gtsst::compressors::compactionv5t {
             number_of_words_flushed = encode_result.flushes_before;
             block_out_location = encode_result.out;
             active_out_block = encode_result.active_out_block;
+
+            // If we failed to flush, this block shouldn't be encoded. Just stop in that case
+            if (encode_result.flush_failed) {
+                encode_failed = true;
+                break;
+            }
         }
 
         // Flush the buffers until all threads have fully written their data
-        while (can_flush(active_out_block, block_out_location)) {
+        while (!encode_failed && can_flush(active_out_block, block_out_location)) {
             assert(__activemask() == 0xFFFFFFFF);
 
             // If this is an early flush (== active block is not yet filled by this thread) we need to add some padding
@@ -351,15 +368,20 @@ namespace gtsst::compressors::compactionv5t {
                 block_out_location %= n_out_symbols_buf; // Make sure that output wraps around
             }
 
-            flush(tmp, result, number_of_words_flushed, active_out_block);
+            if (!flush(tmp, result, number_of_words_flushed, active_out_block)) encode_failed = true;
             active_out_block = (active_out_block + 1) % tile_out_word_buf_size;
             number_of_words_flushed += 1;
         }
 
-        assert(block_out_location % sizeof(uint32_t) == 0);
+        assert(encode_failed || block_out_location % sizeof(uint32_t) == 0);
 
         // Update number of flushes in smem
         if (threadIdx.x % 32 == 0) {
+            // Make sure that encoding failure in a warp propagates through the entire thread block (or at least thread 0)
+            if (encode_failed) {
+                number_of_words_flushed = 0;
+            }
+
             n_flushes[threadIdx.x / 32] = number_of_words_flushed;
         }
 
@@ -368,6 +390,11 @@ namespace gtsst::compressors::compactionv5t {
         // Find block max
         uint32_t target_number_of_words_flushed = number_of_words_flushed;
         for (const uint16_t flushes : n_flushes) {
+            // If any thread flushed 0 times, its encoding failed. So the entire block fails
+            if (flushes == 0) {
+                encode_failed = true;
+            }
+
             if (flushes > target_number_of_words_flushed) {
                 target_number_of_words_flushed = flushes;
             }
@@ -380,16 +407,16 @@ namespace gtsst::compressors::compactionv5t {
         // Complete block
         active_out_block = 0;
         result[active_out_block][threadIdx.x] = 0xFEFEFEFE;
-        while (number_of_words_flushed < target_number_of_words_flushed) {
+        while (!encode_failed && number_of_words_flushed < target_number_of_words_flushed) {
             assert(__activemask() == 0xFFFFFFFF);
-            flush(tmp, result, number_of_words_flushed, active_out_block);
+            if (!flush(tmp, result, number_of_words_flushed, active_out_block)) encode_failed = true;
             number_of_words_flushed += 1;
         }
 
         __syncthreads();
 
-        // Run block-level transpose
-        if (threadIdx.x == 0) {
+        // Run block-level transpose (if the encoding step didn't fail)
+        if (threadIdx.x == 0 && !encode_failed) {
             assert(number_of_words_flushed % 32 == 0);
 
             const auto aligned_transpose_src = (uint32_t*)(tmp + (uint64_t)blockIdx.x * TMP_OUT_BLOCK_SIZE);
@@ -413,9 +440,9 @@ namespace gtsst::compressors::compactionv5t {
             CompactionV5TBlockHeader header = {
                 {
                     .uncompressed_size = BLOCK_SIZE, // TODO: change this later to support padding in input
-                    .compressed_size = aggregate,
+                    .compressed_size = encode_failed ? BLOCK_SIZE : aggregate, // If failed, compressed == uncompressed
                 },
-                header.flushes = number_of_words_flushed,
+                header.flushes = encode_failed ? 0 : number_of_words_flushed, // If failed, act as if there were no flushed (==no data)
             };
 
             headers[blockIdx.x] = header;

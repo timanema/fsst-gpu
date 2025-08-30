@@ -185,7 +185,7 @@ namespace gtsst::bench {
                 exit(1);
             }
 
-            printf("decomp: %.3f\n", (double)stats.original_len / (1.0e9 * (duration.count() * 1.0e-6)));
+            printf("%.3f\n", (double)stats.original_len / (1.0e9 * (duration.count() * 1.0e-6)));
             decompression_times.push_back(duration);
         }
 

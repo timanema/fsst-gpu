@@ -11,7 +11,7 @@
 namespace gtsst::compressors {
     CompressionConfiguration CompactionV5TCompressor::configure_compression(const size_t buf_size) {
         return CompressionConfiguration{.input_buffer_size = buf_size,
-                                        .compression_buffer_size = buf_size,
+                                        .compression_buffer_size = buf_size + 76800, // TODO: would be nicer to have some header size estimation here to accommodate poor compression, but for now just assume 75KiB is plenty..
                                         .temp_buffer_size = buf_size,
                                         .min_alignment_input = compactionv5t::WORD_ALIGNMENT,
                                         .min_alignment_output = compactionv5t::WORD_ALIGNMENT,
@@ -92,10 +92,13 @@ namespace gtsst::compressors {
         GBaseHeader* table_headers_host;
         CompactionV5TBlockHeader* block_headers_host;
         uint8_t* sample_data_host;
+        uint64_t* block_fix_list;
         safeCUDACall(cudaMallocHost(&metadata_host, metadata_mem_size));
         safeCUDACall(cudaMallocHost(&table_headers_host, sizeof(GBaseHeader) * number_of_tables));
         safeCUDACall(cudaMallocHost(&block_headers_host, block_headers_mem_size));
         safeCUDACall(cudaMallocHost(&sample_data_host, sample_data_mem_size));
+        safeCUDACall(cudaMallocHost(&block_fix_list, number_of_blocks * sizeof(uint64_t)));
+        block_fix_list[0] = 1; // Block 0 is special (the only valid number for block 0 is 0, while it's the opposite for every other block)
 
         // Some CUDA bookkeeping
         compactionv5t::GCompactionMetadata* metadata_gpu;
@@ -181,13 +184,6 @@ namespace gtsst::compressors {
             file_header.table_size += metadata_host[table_id].header_offset;
         }
 
-        // Useful output debug
-        // auto x = (char*) malloc(compactionv2::BLOCK_SIZE/2);
-        // safeCUDACall(cudaMemcpy(x, tmp, compactionv2::BLOCK_SIZE/2, cudaMemcpyDeviceToHost));
-        // std::ofstream out_file("/home/tim/test.out", std::ios::binary);
-        // out_file.write(x, compactionv2::BLOCK_SIZE/2);
-        // free(x);
-
         // Copy block headers
         safeCUDACall(cudaMemcpyAsync(header_gpu + header_size, block_headers_host, block_headers_mem_size,
                                      cudaMemcpyHostToDevice));
@@ -200,12 +196,26 @@ namespace gtsst::compressors {
 
         // Then gather data
         uint64_t running_length = 0;
+        uint64_t running_filtered_length = 0; // Also keep track of running_length after filtering (so running_length - count(0xFE))
         for (uint32_t block_id = 0; block_id < number_of_blocks; block_id++) {
+            assert(block_headers_host[block_id].flushes <= compactionv5t::tile_out_len_words); // A block cannot overflow its buffer
+
             uint8_t* running_dst = tmp + running_length;
-            size_t block_size = block_headers_host[block_id].flushes * compactionv5t::THREAD_COUNT * sizeof(uint32_t);
-            safeCUDACall(cudaMemcpyAsync(running_dst, dst + compactionv5t::TMP_OUT_BLOCK_SIZE * block_id, block_size,
-                                         cudaMemcpyDeviceToDevice));
+            uint16_t block_flushes = block_headers_host[block_id].flushes;
+            size_t block_size = block_flushes * compactionv5t::THREAD_COUNT * sizeof(uint32_t);
+
+            if (block_flushes > 0) {
+                safeCUDACall(cudaMemcpyAsync(running_dst, dst + compactionv5t::TMP_OUT_BLOCK_SIZE * block_id, block_size,
+                                             cudaMemcpyDeviceToDevice));
+            } else {
+                // Block couldn't be compressed, for now put in some filler data. Will fix later (cannot run original data through filtering, might contain 0xFE)
+                block_size = compactionv5t::BLOCK_SIZE;
+                safeCUDACall(cudaMemsetAsync(running_dst, 0x42, block_size)); // TODO: I don't like this, probably nicer way somehow
+                block_fix_list[block_id] = running_filtered_length; // Keep track of where we will need to place original data for this block
+            }
+
             running_length += block_size;
+            running_filtered_length += block_headers_host[block_id].compressed_size;
         }
 
         // Then do stream compaction on the actual data
@@ -219,11 +229,24 @@ namespace gtsst::compressors {
         // Copy header to dst
         safeCUDACall(cudaMemcpy(dst, header_gpu, header_size, cudaMemcpyDeviceToDevice));
 
+        // And now fix blocks that couldn't be encoded
+        for (uint32_t block_id = 0; block_id < number_of_blocks; block_id++) {
+            uint64_t fix_location = block_fix_list[block_id];
+            bool need_to_fix = (block_id == 0) == (fix_location == 0);
+
+            if (need_to_fix) {
+                const uint8_t* fix_src = src + (size_t) compactionv5t::BLOCK_SIZE * block_id;
+                uint8_t* fix_dst = dst + header_size + fix_location;
+                safeCUDACall(cudaMemcpy(fix_dst, fix_src, compactionv5t::BLOCK_SIZE, cudaMemcpyDeviceToDevice));
+            }
+        }
+
         // Finally, free buffers
         safeCUDACall(cudaFreeHost(metadata_host));
         safeCUDACall(cudaFreeHost(table_headers_host));
         safeCUDACall(cudaFreeHost(block_headers_host));
         safeCUDACall(cudaFreeHost(sample_data_host));
+        safeCUDACall(cudaFreeHost(block_fix_list));
 
         // And free cuda buffers
         safeCUDACall(cudaFree(metadata_gpu));

@@ -49,21 +49,30 @@ namespace gtsst::compressors {
 
         // Then decode all blocks
         uint64_t out = 0;
+        int num_encoded_blocks = 0;
         for (int block_id = 0; block_id < file_header.num_blocks; block_id++) {
             fsst::DecodingTable decoder = decoders[block_id / compactionv5t::SUPER_BLOCK_SIZE];
             const uint32_t block_size = block_headers[block_id].compressed_size;
             memcpy(block_mem, src + in, block_size);
 
-            const uint32_t block_out = seq_decompress(decoder, block_mem, dst + out, block_size);
+            // If there are flushes, this is a compressed block. Otherwise plain-text, then just copy
+            if (block_headers[block_id].flushes > 0) {
+                const uint32_t block_out = seq_decompress(decoder, block_mem, dst + out, block_size);
 
-            // If output size doesn't match, the block is corrupt
-            if (block_out != block_headers[block_id].uncompressed_size) {
-                free(block_headers);
-                free(block_mem);
-                return gtsstErrorCorruptBlock;
+                // If output size doesn't match, the block is corrupt
+                if (block_out != block_headers[block_id].uncompressed_size) {
+                    free(block_headers);
+                    free(block_mem);
+                    return gtsstErrorCorruptBlock;
+                }
+
+                out += block_out;
+                num_encoded_blocks += 1;
+            } else {
+                memcpy(dst + out, block_mem, block_size);
+                out += block_size;
             }
 
-            out += block_out;
             in += block_size;
         }
 
@@ -78,6 +87,9 @@ namespace gtsst::compressors {
 
         // Update output
         *out_size = out;
+
+        // Print some stats for me :)
+        printf("decomp blocks: %d/%d, throughput: ", num_encoded_blocks, file_header.num_blocks);
 
         return gtsstSuccess;
     }

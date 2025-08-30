@@ -72,7 +72,8 @@ However, this will likely result in the following error:
 `Error: filesystem error: directory iterator cannot open directory: No such file or directory [../../thesis-testing/lineitem-1gb/]`
 This is because, by default, the project uses this directory to load data.
 The directories to use can be given as a program argument:
-`./gtsst ../../thesis-testing/lineitem-1gb/ ../../thesis-testing/lineitem-0.5gb/`
+`./gtsst ../../thesis-testing/lineitem-1gb/ ../../thesis-testing/lineitem-0.5gb/`.
+Note that the program accepts _directories_, not _files_.
 
 By default, the final pipeline is used to perform 100 compression iterations on all files in the given directories and
 a single validation decompression. This can be changed by modifying the main.cu file:
@@ -114,3 +115,42 @@ int main(int argc, char* argv[]) {
 }
 ```
 The default directories can be modified, the compressor can be chosen, and the number of iterations can be selected.
+
+Note that the current version of the compressor required the input buffer to be a multiple of the block size (1310720 bytes). 
+The benchmark files account for this, but if you want to extract the compressor from the code, this must be fixed.
+
+### Output data
+The output will be in the following format:
+```
+encoding: 14.462
+encoding: 19.364
+encoding: 19.040
+...
+encoding: 18.133
+encoding: 18.968
+decomp blocks: 755/755, throughput: 0.353
+Cycles (100, 1) completed. Stats:
+	Parameters:
+		Block size: 1310720
+		Input size: 989593600
+		Effective table size: 62914560
+		File name: ../../thesis-testing/lineitem-1gb/lineitem-comments-1gb-1.txt
+	Compression:
+		Duration (us): 68281 
+		Throughput (GB/s): 14.520
+		Compressed size: 351877203
+	Decompression:
+		Duration (us): 2802211
+		Throughput (GB/s): 0.353
+		Ratio: 2.8123
+	Compression phases:
+		Table generation (GB/s, us): 221.882 (4460)
+		Precomputation (GB/s, us): 49479.680 (20)
+		Encoding (GB/s, us): 18.656 (53045)
+		Postprocessing (GB/s, us): 107.670 (9191)
+```
+The individual encoding throughput and decompression throughput will be reported for every iteration.
+For decompression, the number of blocks with compressed data and the total number of blocks will also be reported.
+If there are any differences in the decompressed data compared to the original data, their location and values will be reported.
+Finally, a summary will be printed. This contains the (average) throughput for compression
+(and the individual stages) and decompression, as well as the compression ratio.
