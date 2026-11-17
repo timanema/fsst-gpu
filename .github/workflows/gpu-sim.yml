@@ -1,0 +1,101 @@
+name: GPU round trip (simulated H100)
+
+# Optional, non-required check. Hosted runners have no GPU, so this builds
+# gtsst and runs a compress / decompress / compare cycle on a simulated NVIDIA
+# H100 (https://github.com/pantheongpu/pantheonsim). A simulator cannot
+# reproduce hardware-specific behavior or timing.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "include/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-sim:
+    name: CUDA 13.0, simulated H100
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@deff5781e8adfd83dec98dd5242dcbc96a564773 # v0.1.10
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+
+      # The simulator runs PTX only and needs a shared CUDA runtime. The
+      # CMakeLists sets CMAKE_CUDA_ARCHITECTURES to "75 80 86" (SASS), so it is
+      # replaced with 90-virtual for this job. main.cu runs 100 compression
+      # iterations, which is too slow in a simulator, so CI uses one.
+      - name: Select PTX-only architecture and one iteration
+        run: |
+          sed -i 's/set(CMAKE_CUDA_ARCHITECTURES 75 80 86)/set(CMAKE_CUDA_ARCHITECTURES 90-virtual)/' CMakeLists.txt
+          sed -i 's/compression_iterations = 100;/compression_iterations = 1;/' src/main.cu
+          grep -c '90-virtual' CMakeLists.txt
+          grep -c 'compression_iterations = 1;' src/main.cu
+
+      - name: Configure
+        run: |
+          cmake -B build -S . \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc \
+                -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared
+
+      - name: Build
+        run: cmake --build build -j3
+
+      # gtsst reads every file in the given directory, compresses it on the
+      # GPU, decompresses it and compares it with the input (strict checking).
+      # The input is two compression blocks (2 x 1310720 bytes) of
+      # deterministic text-like data. gtsst prints an error but exits 0 when
+      # the directory is missing, so the output is checked explicitly.
+      - name: Generate input
+        run: |
+          mkdir -p data
+          python3 - <<'PY'
+          import random
+          random.seed(1)
+          words = ["furiously", "express", "deposits", "sleep", "carefully", "regular",
+                   "requests", "pending", "accounts", "ironic", "packages", "final",
+                   "theodolites", "boldly", "quickly", "slyly", "blithely", "special"]
+          size = 2 * 1310720
+          out = bytearray()
+          while len(out) < size:
+              out += (" ".join(random.choice(words) for _ in range(random.randint(4, 12))) + "\n").encode()
+          open("data/comments.txt", "wb").write(bytes(out[:size]))
+          PY
+          ls -l data
+
+      - name: Run the compress / decompress / compare cycle
+        working-directory: build
+        run: |
+          vgpu run ./gtsst ../data/ 2>&1 | tee out.txt
+          ! grep -q 'VirtualGPU error' out.txt
+          ! grep -qi 'no device' out.txt
+          ! grep -q 'Cycle data mismatch' out.txt
+          ! grep -q 'error' out.txt
+          ! grep -q 'Error' out.txt
+          grep -q 'Cycles (1, 1) completed' out.txt
+          # at least one block must really have been compressed (not copied)
+          grep -Eq 'decomp blocks: [1-9][0-9]*/2,' out.txt
+          # compressed size must be smaller than the input size
+          in=$(sed -n 's/.*Input size: \([0-9]*\).*/\1/p' out.txt)
+          cs=$(sed -n 's/.*Compressed size: \([0-9]*\).*/\1/p' out.txt)
+          echo "input=$in compressed=$cs"
+          test "$in" = 2621440
+          test "$cs" -gt 0 -a "$cs" -lt "$in"
